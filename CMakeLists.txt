@@ -41,6 +41,8 @@ message (STATUS "GLOBUS_MOPTION = ${GLOBUS_MOPTION}")
 
 include_directories(${GLOBUS_CONFINC_PATH} ${GLOBUS_INC_PATH})
 
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
+
 set_property (SOURCE globus_gridftp_server_ceph.c
   PROPERTY COMPILE_FLAGS "${GLOBUS_MOPTION}")
 add_library (globus_gridftp_server_ceph SHARED

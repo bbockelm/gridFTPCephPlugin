@@ -85,34 +85,6 @@ static void logwrapper(char* format, ...) {
   va_end(arg);
 }
 
-/// simple integer parsing, to be replaced by std::stoll when C++11 can be used
-static unsigned long long int stoull(const std::string &s) {
-  char* end;
-  errno = 0;
-  unsigned long long int res = strtoull(s.c_str(), &end, 10);
-  if (0 != *end) {
-    throw std::invalid_argument(s);
-  }
-  if (ERANGE == errno) {
-    throw std::out_of_range(s);
-  }
-  return res;
-}
-
-/// simple integer parsing, to be replaced by std::stoi when C++11 can be used
-static unsigned int stoui(const std::string &s) {
-  char* end;
-  errno = 0;
-  unsigned long int res = strtoul(s.c_str(), &end, 10);
-  if (0 != *end) {
-    throw std::invalid_argument(s);
-  }
-  if (ERANGE == errno || res > std::numeric_limits<unsigned int>::max()) {
-    throw std::out_of_range(s);
-  }
-  return (unsigned int)res;
-}
-
 /// fills the userId of a ceph file struct from the userId from the grid-mapfile
 /// returns position of first character after the userId
 static int getCephUserId(const std::string &params) {
@@ -189,7 +161,7 @@ static int getCephNbStripes(const std::string &params, unsigned int offset, unsi
           logwrapper((char*)"%s : remainder = %s\n", __FUNCTION__, remainder.c_str());
          }       
         
-        *nbStripes = stoui(params.substr(offset));
+        *nbStripes = stoi(params.substr(offset));
         if (!strcmp(getdebug(), "9")) {
           logwrapper((char*)"%s : setting nbStripes to %d\n", __FUNCTION__, *nbStripes);
         }
@@ -202,7 +174,7 @@ static int getCephNbStripes(const std::string &params, unsigned int offset, unsi
       return params.size();
     }
   } else {
-    *nbStripes = stoui(params.substr(offset, comPos-offset));
+    *nbStripes = stoi(params.substr(offset, comPos-offset));
     if (!strcmp(getdebug(), "9")) {
       logwrapper((char*)"%s : nbStripes = %d\n", __FUNCTION__,  *nbStripes);
     }    
@@ -375,7 +347,7 @@ static int fillCephNbStripes(const std::string &params, unsigned int offset, Cep
           logwrapper((char*)"%s : remainder = %s\n", __FUNCTION__, remainder.c_str());
         }       
         
-        file.nbStripes = stoui(params.substr(offset));
+        file.nbStripes = stoi(params.substr(offset));
         if (!strcmp(getdebug(), "9")) {
           logwrapper((char*)"%s : nbStripes = %d\n", __FUNCTION__,  file.nbStripes);
         }
@@ -385,7 +357,7 @@ static int fillCephNbStripes(const std::string &params, unsigned int offset, Cep
      
     return params.size();
   } else {
-    file.nbStripes = stoui(params.substr(offset, comPos-offset));
+    file.nbStripes = stoi(params.substr(offset, comPos-offset));
     if (!strcmp(getdebug(), "9")) {
       logwrapper((char*)"%s : nbStripes = %d\n", __FUNCTION__,  file.nbStripes);
     }    
@@ -450,7 +422,7 @@ static void fillCephObjectSize(const std::string &params, unsigned int offset, C
       if (!strcmp("9", getdebug())) {
         logwrapper((char*)"%s : String objectSize = %s\n", __FUNCTION__, objectSize.c_str());
       }
-      file.objectSize = stoull(objectSize.c_str());
+      file.objectSize = std::stoull(objectSize.c_str());
     }
     if (!strcmp("9", getdebug())) {
       logwrapper((char*)"%s : objectSize = %d\n", __FUNCTION__, file.objectSize);
