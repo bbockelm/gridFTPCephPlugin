@@ -22,6 +22,10 @@
 #include <limits>
 #include <ceph_posix.h>
 
+#include <atomic>
+#include <mutex>
+#include <condition_variable>
+
 #define  CA_MAXCKSUMLEN 32
 #define  CA_MAXCKSUMNAMELEN 15
 
@@ -46,19 +50,61 @@ struct CephFile {
   unsigned long long objectSize;
 };
 
+void fillCephFile(const char *path, CephFile &file);
+
 struct CephFileRef : CephFile {
+
+  CephFileRef(const char *path, int inflags, mode_t inmode, unsigned long long inoffset) :
+    flags(inflags), mode(inmode), offset(inoffset), last_block_size(0), est_pending_writes(0)
+  {
+    fillCephFile(path, *this);
+  }
+
+  void wait_for_aio() {
+    if (est_pending_writes <= 64*1024*1024) {
+      return;
+    }
+    {
+      std::unique_lock<std::mutex> lk(lock);
+      cond.wait(lk, [this]{return est_pending_writes > 64*1024*1024;});
+    }
+    auto it = aio.begin();
+    while (it != aio.end()) {
+      if ((*it)->is_safe()) {
+        (*it)->release();
+        it = aio.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+
   int flags;
   mode_t mode;
   unsigned long long offset;
+  std::vector<std::shared_ptr<librados::AioCompletion>> aio;
+  std::atomic<size_t> last_block_size;
+  std::atomic<size_t> est_pending_writes;
+  std::mutex lock;
+  std::condition_variable cond;
 };
 
+void block_complete(librados::completion_t, void *arg) {
+  CephFileRef *fr = static_cast<CephFileRef *>(arg);
+  assert(fr);
+  fr->est_pending_writes -= fr->last_block_size;
+  if (fr->est_pending_writes < 0) {
+    fr->est_pending_writes = 0;
+  }
+  fr->cond.notify_all();
+}
 
 /// global variables holding stripers and ioCtxs for each ceph pool plus the cluster object
 std::map<std::string, libradosstriper::RadosStriper*> g_radosStripers;
 std::map<std::string, librados::IoCtx*> g_ioCtx;
 librados::Rados* g_cluster = 0;
 /// global variable holding a map of file descriptor to file reference
-std::map<unsigned int, CephFileRef> g_fds;
+std::map<unsigned int, std::shared_ptr<CephFileRef>> g_fds;
 /// global variable holding a list of files currently opened for write
 std::multiset<std::string> g_filesOpenForWrite;
 /// global variable remembering the next available file descriptor
@@ -195,7 +241,7 @@ static int getCephStripeUnit(const std::string &params, unsigned int offset, uns
   size_t comPos = params.find(',', offset);
   if (std::string::npos == comPos) {
     if (params.size() != offset) {
-      *stripeUnit = stoull(params.substr(offset));
+      *stripeUnit = std::stoull(params.substr(offset));
         if (!strcmp(getdebug(), "9")) {
           logwrapper((char*)"%s : params.size() != offset, stripeUnit = %d\n", __FUNCTION__, *stripeUnit);
         }
@@ -213,7 +259,7 @@ static int getCephStripeUnit(const std::string &params, unsigned int offset, uns
     if (!strcmp("9", getdebug())) {
       logwrapper((char*)"%s : stripeUnit to convert = %s, offset = %d\n", __FUNCTION__, stripeUnitStr.c_str());
     }     
-    *stripeUnit = stoull(stripeUnitStr); // /* params.substr(offset, comPos-offset) */);
+    *stripeUnit = std::stoull(stripeUnitStr); // /* params.substr(offset, comPos-offset) */);
     if (!strcmp("9", getdebug())) {
       logwrapper((char*)"%s : stripeUnit = %u, returning %d\n",
               __FUNCTION__, *stripeUnit, comPos+1);
@@ -241,13 +287,13 @@ static void getCephObjectSize(const std::string &params, unsigned int offset, un
       if (!strcmp("9", getdebug())) {
         logwrapper((char*)"%s : No colon found\n", __FUNCTION__);
       } 
-      *objectSize = stoull(params.substr(offset));
+      *objectSize = std::stoull(params.substr(offset));
     } else {
       std::string objectSizeStr = params.substr(offset, colonPos-offset);
       if (!strcmp("9", getdebug())) {
         logwrapper((char*)"%s : String objectSize = %s\n", __FUNCTION__, objectSizeStr.c_str());
       }
-      *objectSize = stoull(objectSizeStr);
+      *objectSize = std::stoull(objectSizeStr);
     }
     if (!strcmp("9", getdebug())) {
       logwrapper((char*)"%s : objectSize = %d\n", __FUNCTION__, *objectSize);
@@ -378,7 +424,7 @@ static int fillCephStripeUnit(const std::string &params, unsigned int offset, Ce
   size_t comPos = params.find(',', offset);
   if (std::string::npos == comPos) {
     if (params.size() != offset) {
-      file.stripeUnit = stoull(params.substr(offset));
+      file.stripeUnit = std::stoull(params.substr(offset));
         if (!strcmp(getdebug(), "9")) {
           logwrapper((char*)"%s : params.size() != offset, stripeUnit = %d\n", __FUNCTION__, file.stripeUnit);
         }
@@ -389,7 +435,7 @@ static int fillCephStripeUnit(const std::string &params, unsigned int offset, Ce
     if (!strcmp("9", getdebug())) {
       logwrapper((char*)"%s : stripeUnit to convert = %s, offset = %d\n", __FUNCTION__, stripeUnit.c_str());
     }     
-    file.stripeUnit = stoull(stripeUnit /* params.substr(offset, comPos-offset) */);
+    file.stripeUnit = std::stoull(stripeUnit /* params.substr(offset, comPos-offset) */);
     if (!strcmp("9", getdebug())) {
       logwrapper((char*)"%s : stripeUnit = %u, returning %d\n",
               __FUNCTION__, file.stripeUnit, comPos+1);
@@ -416,7 +462,7 @@ static void fillCephObjectSize(const std::string &params, unsigned int offset, C
       if (!strcmp("9", getdebug())) {
         logwrapper((char*)"%s : No colon found\n", __FUNCTION__);
       } 
-      file.objectSize = stoull(params.substr(offset));
+      file.objectSize = std::stoull(params.substr(offset));
     } else {
         std::string objectSize = params.substr(offset, colonPos-offset);
       if (!strcmp("9", getdebug())) {
@@ -543,14 +589,6 @@ static CephFile getCephFile(const char *path) {
   return file;
 }
 
-static CephFileRef getCephFileRef(const char *path, int flags,mode_t mode,unsigned long long offset) {
-  CephFileRef fr;
-  fillCephFile(path, fr);
-  fr.flags = flags;
-  fr.mode = mode;
-  fr.offset = 0;
-  return fr;
-}
 /*
  * Get the parameters. Inject the userId here.
  *
@@ -767,7 +805,7 @@ extern "C" {
     if (!strcmp(getdebug(), "1")) {
       logwrapper((char*) "%s : %s\n", __FUNCTION__, pathname);
     }      
-    CephFileRef fr = getCephFileRef(pathname, 0, (mode_t)0, 0); // flags, mode, 0);
+    CephFileRef fr(pathname, 0, (mode_t)0, 0);
     libradosstriper::RadosStriper *striper = getRadosStriper(fr);
     if (NULL == striper) {
       logwrapper((char*) "%s : Can't get striper\n", __FUNCTION__);
@@ -794,21 +832,28 @@ extern "C" {
 
   int ceph_posix_open(const char *pathname, int flags, mode_t mode) {
     logwrapper((char*)"ceph_posix_open : fd %d associated to %s\n", g_nextCephFd, pathname);
-    CephFileRef fr = getCephFileRef(pathname, flags, mode, 0);
+    std::shared_ptr<CephFileRef> fr(new CephFileRef(pathname, flags, mode, 0));
     g_fds[g_nextCephFd] = fr;
     g_nextCephFd++;
     if (flags & O_WRONLY) {
-      g_filesOpenForWrite.insert(fr.name);
+      g_filesOpenForWrite.insert(fr->name);
     }
     return g_nextCephFd-1;
   }
 
   int ceph_posix_close(int fd) {
-    std::map<unsigned int, CephFileRef>::iterator it = g_fds.find(fd);
+    auto it = g_fds.find(fd);
     if (it != g_fds.end()) {
       logwrapper((char*)"ceph_close: closed fd %d\n", fd);
-      if (it->second.flags & O_WRONLY) {
-        g_filesOpenForWrite.erase(g_filesOpenForWrite.find(it->second.name));
+      if (it->second->flags & O_WRONLY) {
+        g_filesOpenForWrite.erase(g_filesOpenForWrite.find(it->second->name));
+      }
+      {
+        std::unique_lock<std::mutex> lk(it->second->lock);
+        for (auto &aio_it : it->second->aio) {
+          aio_it->release();
+        }
+        it->second->aio.clear();
       }
       g_fds.erase(it);
       return 0;
@@ -832,9 +877,9 @@ extern "C" {
   }
 
   off64_t ceph_posix_lseek64(int fd, off64_t offset, int whence) {
-    std::map<unsigned int, CephFileRef>::iterator it = g_fds.find(fd);
+    auto it = g_fds.find(fd);
     if (it != g_fds.end()) {
-      CephFileRef &fr = it->second;
+      CephFileRef &fr = *(it->second);
 #ifdef VERYLOWLEVELTRACE     
       logwrapper((char*)"ceph_lseek64: for fd %d, offset=%lld, whence=%d\n", fd, offset, whence);
 #endif
@@ -848,9 +893,9 @@ extern "C" {
 #ifdef TRACE_WRITES
     static int blocksize_reported = 0;
 #endif    
-    std::map<unsigned int, CephFileRef>::iterator it = g_fds.find(fd);
+    auto it = g_fds.find(fd);
     if (it != g_fds.end()) {
-      CephFileRef &fr = it->second;
+      CephFileRef &fr = *(it->second);
 #ifdef WIBBLERS      
       logwrapper((char*)"%s: for fd %d, count=%d\n", __FUNCTION__, fd, count);
 #endif
@@ -880,12 +925,81 @@ extern "C" {
     }
   }
 
+  ssize_t ceph_posix_write_async(int fd, const void *buf, size_t count) {
+#ifdef TRACE_WRITES
+    static int blocksize_reported = 0;
+#endif
+    auto it = g_fds.find(fd);
+    if (it != g_fds.end()) {
+      CephFileRef &fr = *(it->second);
+#ifdef WIBBLERS      
+      logwrapper((char*)"%s: for fd %d, count=%d\n", __FUNCTION__, fd, count);
+#endif
+      if ((fr.flags & O_WRONLY) == 0) {
+        return -EBADF;
+      }
+      libradosstriper::RadosStriper *striper = getRadosStriper(fr);
+      if (0 == striper) {
+        return -EINVAL;
+      }
+      librados::AioCompletion *aio_raw = librados::Rados::aio_create_completion();
+      if (aio_raw == nullptr) {
+          return -ENOMEM;
+      }
+      fr.aio.emplace_back(aio_raw);
+      fr.last_block_size = count;
+      fr.aio.back()->set_complete_callback(&fr, block_complete);
+      fr.wait_for_aio();
+      ceph::bufferlist bl;
+      bl.append((const char*)buf, count);
+      int rc = striper->aio_write(fr.name, aio_raw, bl, count, fr.offset);
+#ifdef TRACE_WRITES    
+      if (!blocksize_reported) {
+        logwrapper((char*)"%s : \n\t\t\tstriper->write_async(%s:%s, %d, offset= %lld) = %d\n",
+              __FUNCTION__, fr.pool.c_str(), fr.name.c_str(), count, fr.offset, rc);
+        blocksize_reported = 1;
+      }
+#endif
+      if (rc != 0)
+          return rc;
+      fr.est_pending_writes += count;
+      fr.offset += count;
+      return count;
+    } else {
+      return -EBADF;
+    }
+  }
+
+  ssize_t ceph_posix_flush(int fd) {
+    auto it = g_fds.find(fd);
+    if (it == g_fds.end()) {
+      return -EBADF;
+    }
+
+    auto &fr = *(it->second);
+    if (fr.aio.size() == 0) {
+      return 0;
+    }
+
+    auto *striper = getRadosStriper(fr);
+    if (striper == nullptr) {
+      return -EINVAL;
+    }
+    int rc = striper->aio_flush();
+    if (rc) {return rc;}
+    for (auto it : fr.aio) {
+      int rc = it->get_return_value();
+      if (rc) {return rc;}
+    }
+    return 0;
+  }
+
   ssize_t ceph_posix_read(int fd, void *buf, size_t count) {
-    std::map<unsigned int, CephFileRef>::iterator it = g_fds.find(fd);
+    auto it = g_fds.find(fd);
     static int reported_size = 0;
     
     if (it != g_fds.end()) {
-      CephFileRef &fr = it->second;
+      CephFileRef &fr = *(it->second);
 #ifdef LOWLEVELTRACE  
       if (reported_size == 0) {
         logwrapper((char*)"%s: for fd %d, count=%d\n", __FUNCTION__, fd, count);
@@ -998,9 +1112,9 @@ extern "C" {
   
   ssize_t ceph_posix_fgetxattr(int fd, const char* name,
                                void* value, size_t size) {
-    std::map<unsigned int, CephFileRef>::iterator it = g_fds.find(fd);
+    auto it = g_fds.find(fd);
     if (it != g_fds.end()) {
-      CephFileRef &fr = it->second;
+      CephFileRef &fr = *(it->second);
       if (!strcmp(getdebug(), "9")) {
         logwrapper((char*)"%s: fd %d, attribute name=%s\n", __FUNCTION__, fd, name);
       }
@@ -1028,9 +1142,9 @@ extern "C" {
   int ceph_posix_fsetxattr(int fd,
                            const char* name, const void* value,
                            size_t size, int flags)  {
-    std::map<unsigned int, CephFileRef>::iterator it = g_fds.find(fd);
+    auto it = g_fds.find(fd);
     if (it != g_fds.end()) {
-      CephFileRef &fr = it->second;
+      CephFileRef &fr = *(it->second);
       logwrapper((char*)"ceph_fsetxattr: fd %d name=%s value=%s\n", fd, name, value);
       return ceph_posix_internal_setxattr(fr, name, value, size, flags);
     } else {

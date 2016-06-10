@@ -164,6 +164,10 @@ static void globus_ceph_close(const char* func,
                               globus_l_gfs_ceph_handle_t* ceph_handle,
                               const char* error_msg) {
   char* errorBuf = NULL;
+  // Synchronously flushes any outstanding writes.
+  if (ceph_posix_flush(ceph_handle->fd) && !error_msg) {
+    error_msg = "Failure when flushing remaining data to Ceph.";
+  }
   ceph_handle->done = GLOBUS_TRUE;
   ceph_posix_close(ceph_handle->fd);
   if (error_msg) {
@@ -464,7 +468,7 @@ static void globus_l_gfs_file_net_read_cb(globus_gfs_operation_t op,
         ceph_handle->cached_res = globus_l_gfs_make_error("seek");
         ceph_handle->done = GLOBUS_TRUE;
       } else {
-        bytes_written = ceph_posix_write(ceph_handle->fd, buffer, nbytes);
+        bytes_written = ceph_posix_write_async(ceph_handle->fd, buffer, nbytes);
         if (bytes_written < 0) {
           globus_gfs_log_message(GLOBUS_GFS_LOG_ERR,"%s: write error, return code %d \n",func, -bytes_written);
           ceph_handle->cached_res = GLOBUS_FAILURE; //globus_l_gfs_make_error("write"); // GLOBUS_FAILURE;

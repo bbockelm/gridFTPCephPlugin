@@ -21,6 +21,8 @@ extern "C" {
   int ceph_posix_close(int fd);
   off64_t ceph_posix_lseek64(int fd, off64_t offset, int whence);
   ssize_t ceph_posix_write(int fd, const void *buf, size_t count);
+  ssize_t ceph_posix_write_async(int fd, const void *buf, size_t count);
+  ssize_t ceph_posix_flush(int fd);
   ssize_t ceph_posix_read(int fd, void *buf, size_t count);
   int ceph_posix_stat64(const char *pathname, struct stat64 *buf);
   ssize_t ceph_posix_fgetxattr(int fd, const char* name, void* value, size_t size);
